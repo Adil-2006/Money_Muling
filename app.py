@@ -10,9 +10,10 @@ import uuid
 from collections import defaultdict
 
 app = Flask(__name__)
-app.config['UPLOAD_FOLDER'] = 'uploads'
+# use Vercel-compatible temporary path for uploads
+app.config['UPLOAD_FOLDER'] = '/tmp'
 app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024
-os.makedirs('uploads', exist_ok=True)
+# no need to create the directory since /tmp already exists and is ephemeral
 
 analysis_results = {}
 
@@ -520,6 +521,4 @@ def download(rid):
         json.dump(analysis_results[rid],f,indent=2)
     return send_file(path,as_attachment=True)
 
-if __name__=="__main__":
-    print("🚀 MuleSight Premium Running")
-    app.run(debug=True)
+app = app
