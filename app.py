@@ -3,7 +3,7 @@ import time
 import json
 import pandas as pd
 import networkx as nx
-from flask import Flask, request, jsonify, send_file, render_template_string
+from flask import Flask, request, jsonify, send_file, render_template_string, Response
 from werkzeug.utils import secure_filename
 from datetime import datetime
 import uuid
@@ -446,79 +446,88 @@ def parse_csv(path):
 
 @app.route('/analyze',methods=['POST'])
 def analyze():
-    start=time.time()
-    file=request.files['file']
-    filename=secure_filename(str(uuid.uuid4())+"_"+file.filename)
-    path=os.path.join(app.config['UPLOAD_FOLDER'],filename)
-    file.save(path)
+    try:
+        start=time.time()
+        file=request.files['file']
+        filename=secure_filename(str(uuid.uuid4())+"_"+file.filename)
+        path=os.path.join(app.config['UPLOAD_FOLDER'],filename)
+        file.save(path)
 
-    df=parse_csv(path)
-    G=nx.DiGraph()
+        df=parse_csv(path)
+        G=nx.DiGraph()
 
-    for row in df.itertuples(index=False):
-        G.add_edge(row.sender_id,row.receiver_id)
+        for row in df.itertuples(index=False):
+            G.add_edge(row.sender_id,row.receiver_id)
 
-    cycles=[]
-    if len(G.nodes())<config.MAX_CYCLE_NODES:
-        try:
-            for c in nx.simple_cycles(G):
-                if config.MIN_CYCLE_LENGTH<=len(c)<=config.MAX_CYCLE_LENGTH:
-                    cycles.append(c)
-        except:
-            pass
+        # cycle detection can be extremely expensive; guard with node limit
+        cycles = []
+        if len(G.nodes()) < 1500:
+            try:
+                cycles = [
+                    c for c in nx.simple_cycles(G)
+                    if config.MIN_CYCLE_LENGTH <= len(c) <= config.MAX_CYCLE_LENGTH
+                ]
+            except:
+                cycles = []
 
-    fan_in=df.groupby('receiver_id')['sender_id'].nunique()
-    smurf=fan_in[fan_in>=config.FAN_IN_THRESHOLD]
+        fan_in=df.groupby('receiver_id')['sender_id'].nunique()
+        smurf=fan_in[fan_in>=config.FAN_IN_THRESHOLD]
 
-    scores=defaultdict(float)
-    for c in cycles:
-        for acc in c: scores[acc]+=40
-    for acc in smurf.index:
-        scores[acc]+=30
+        scores=defaultdict(float)
+        for c in cycles:
+            for acc in c: scores[acc]+=40
+        for acc in smurf.index:
+            scores[acc]+=30
 
-    if scores:
-        m=max(scores.values())
-        for k in scores: scores[k]=round((scores[k]/m)*100,2)
+        if scores:
+            m=max(scores.values())
+            for k in scores: scores[k]=round((scores[k]/m)*100,2)
 
-    suspicious=[{"account_id":k,"score":v} for k,v in scores.items() if v>50]
+        suspicious=[{"account_id":k,"score":v} for k,v in scores.items() if v>50]
 
-    nodes=[]
-    for n in G.nodes():
-        s=scores.get(n,0)
-        color="#00e676"
-        if s>70: color="#ff1744"
-        elif s>40: color="#ff9100"
-        nodes.append({"id":n,"label":n[:6],"value":s+10,"color":color})
+        nodes=[]
+        for n in G.nodes():
+            s=scores.get(n,0)
+            color="#00e676"
+            if s>70: color="#ff1744"
+            elif s>40: color="#ff9100"
+            nodes.append({"id":n,"label":n[:6],"value":s+10,"color":color})
 
-    edges=[{"from":u,"to":v} for u,v in G.edges()]
+        edges=[{"from":u,"to":v} for u,v in G.edges()]
 
-    result_id=str(uuid.uuid4())
+        result_id=str(uuid.uuid4())
 
-    output={
-        "result_id":result_id,
-        "summary":{
-            "total_accounts_analyzed":len(G.nodes()),
-            "suspicious_accounts_flagged":len(suspicious),
-            "fraud_rings_detected":len(cycles),
-            "processing_time_seconds":round(time.time()-start,2)
-        },
-        "suspicious_accounts":suspicious,
-        "graph_data":{"nodes":nodes,"edges":edges}
-    }
+        output={
+            "result_id":result_id,
+            "summary":{
+                "total_accounts_analyzed":len(G.nodes()),
+                "suspicious_accounts_flagged":len(suspicious),
+                "fraud_rings_detected":len(cycles),
+                "processing_time_seconds":round(time.time()-start,2)
+            },
+            "suspicious_accounts":suspicious,
+            "graph_data":{"nodes":nodes,"edges":edges}
+        }
 
-    analysis_results[result_id]=output
-    os.remove(path)
+        analysis_results[result_id]=output
+        os.remove(path)
 
-    return jsonify(output)
+        return jsonify(output)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/download/<rid>')
 def download(rid):
     if rid not in analysis_results:
         return jsonify({"error":"Not found"}),404
-    filename=f"mulesight_{datetime.now().strftime('%H%M%S')}.json"
-    path=os.path.join(app.config['UPLOAD_FOLDER'],filename)
-    with open(path,"w") as f:
-        json.dump(analysis_results[rid],f,indent=2)
-    return send_file(path,as_attachment=True)
+
+    data = json.dumps(analysis_results[rid], indent=2)
+    return Response(
+        data,
+        mimetype="application/json",
+        headers={
+            "Content-Disposition": "attachment;filename=mulesight_report.json"
+        }
+    )
 
 app = app
